@@ -322,4 +322,558 @@ nav::-webkit-scrollbar{display:none;}
   </div>
 </div>
 
-<!-- HIS
+<!-- HISTORY -->
+<div class="panel" id="tab-history">
+  <div id="histList"><div class="empty"><em>🎰</em>No history yet.</div></div>
+</div>
+
+<div id="toast"></div>
+
+<!-- SCRIPTS - load sequentially -->
+<script>
+// Load Web3 and LightweightCharts dynamically to ensure they load
+function loadScript(src, cb) {
+  const s = document.createElement('script');
+  s.src = src;
+  s.onload = cb;
+  s.onerror = () => console.warn('Script failed:', src);
+  document.head.appendChild(s);
+}
+
+loadScript('https://cdn.jsdelivr.net/npm/web3@1.10.0/dist/web3.min.js', function() {
+  console.log('Web3 loaded');
+  checkWallet();
+});
+
+loadScript('https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js', function() {
+  console.log('Charts loaded');
+  chartsReady = true;
+});
+
+let chartsReady = false;
+
+// ── CONFIG ──────────────────────────────────────────────────────────
+const CFG = {
+  CONTRACT: '0x85F7a1cD60A2272169AAAD2de9a254304E75B94b',
+  CHAIN_ID:  1979,
+  RPC:      'https://rpc.ritualfoundation.org',
+  EXPLORER: 'https://explorer.ritualfoundation.org',
+  OWNER:    '0xf0b5c1968961230cd6ff2a19f6c926a174902009',
+};
+
+const ABI = [
+  {"inputs":[{"name":"_token","type":"uint8"},{"name":"_direction","type":"uint8"},{"name":"_timeframe","type":"uint256"}],"name":"placeBet","outputs":[],"stateMutability":"payable","type":"function"},
+  {"inputs":[{"name":"_betId","type":"uint256"}],"name":"resolveBet","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[],"name":"depositLP","outputs":[],"stateMutability":"payable","type":"function"},
+  {"inputs":[{"name":"_shares","type":"uint256"}],"name":"withdrawLP","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[],"name":"claimApy","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[],"name":"claimLeaderboard","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[],"name":"withdrawOwner","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[],"name":"resetEpoch","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[],"name":"getPoolInfo","outputs":[{"name":"pool_","type":"uint256"},{"name":"lpApy_","type":"uint256"},{"name":"lbPool_","type":"uint256"},{"name":"ownerBal_","type":"uint256"},{"name":"volume_","type":"uint256"},{"name":"bets_","type":"uint256"},{"name":"maxBet_","type":"uint256"},{"name":"shares_","type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"name":"_user","type":"address"}],"name":"getLPInfo","outputs":[{"name":"shares_","type":"uint256"},{"name":"usdcValue_","type":"uint256"},{"name":"pendingApy_","type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[],"name":"getLeaderboard","outputs":[{"name":"addrs","type":"address[10]"},{"name":"volumes","type":"uint256[10]"},{"name":"bets_","type":"uint256[10]"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"name":"_player","type":"address"}],"name":"getPlayerBets","outputs":[{"name":"","type":"uint256[]"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"name":"_betId","type":"uint256"}],"name":"getBet","outputs":[{"components":[{"name":"player","type":"address"},{"name":"token","type":"uint8"},{"name":"direction","type":"uint8"},{"name":"amount","type":"uint256"},{"name":"entryPrice","type":"uint256"},{"name":"expiry","type":"uint256"},{"name":"status","type":"uint8"},{"name":"timeframe","type":"uint256"},{"name":"placedAt","type":"uint256"},{"name":"potentialPayout","type":"uint256"}],"name":"","type":"tuple"}],"stateMutability":"view","type":"function"},
+  {"inputs":[],"name":"getAllPrices","outputs":[{"name":"","type":"uint256[10]"}],"stateMutability":"view","type":"function"},
+];
+
+// Token list with multiple fallback icon sources
+const TOKENS = [
+  {s:'BTC',cg:'bitcoin',       icon:'₿',   color:'#F7931A'},
+  {s:'ETH',cg:'ethereum',      icon:'Ξ',   color:'#627EEA'},
+  {s:'SOL',cg:'solana',        icon:'◎',   color:'#9945FF'},
+  {s:'BNB',cg:'binancecoin',   icon:'⬡',   color:'#F3BA2F'},
+  {s:'XRP',cg:'ripple',        icon:'✕',   color:'#346AA9'},
+  {s:'ADA',cg:'cardano',       icon:'₳',   color:'#0033AD'},
+  {s:'DOGE',cg:'dogecoin',     icon:'Ð',   color:'#C2A633'},
+  {s:'TRX',cg:'tron',          icon:'⬢',   color:'#EF0027'},
+  {s:'AVAX',cg:'avalanche-2',  icon:'▲',   color:'#E84142'},
+  {s:'TON',cg:'the-open-network',icon:'◈', color:'#0088CC'},
+];
+
+// Icon image URLs with fallbacks
+const ICON_URLS = [
+  // Primary: jsDelivr CDN (most reliable)
+  (cg) => `https://cdn.jsdelivr.net/gh/ErikThiart/cryptocurrency-icons@master/16/${cg}.png`,
+  // Fallback 1: CoinGecko
+  (cg) => `https://assets.coingecko.com/coins/images/${{bitcoin:1,ethereum:279,solana:4128,binancecoin:825,ripple:44,cardano:975,dogecoin:5,tron:1094,'avalanche-2':12559,'the-open-network':17980}[cg]}/small/${cg}.png`,
+];
+
+let iconCache = {};
+
+function getIconEl(tok, size=24) {
+  const t = TOKENS[tok];
+  const img = document.createElement('img');
+  img.className = 'tc-img';
+  img.style.cssText = `width:${size}px;height:${size}px;`;
+  // Try primary URL
+  img.src = `https://cdn.jsdelivr.net/gh/ErikThiart/cryptocurrency-icons@master/16/${t.cg}.png`;
+  img.onerror = function() {
+    // Fallback to colored circle with letter
+    this.style.display = 'none';
+    const span = document.createElement('span');
+    span.className = 'tc-img';
+    span.style.cssText = `width:${size}px;height:${size}px;border-radius:50%;background:${t.color};display:flex;align-items:center;justify-content:center;font-family:var(--font-m);font-size:${size*0.45}px;font-weight:700;color:#fff;`;
+    span.textContent = t.icon;
+    this.parentNode.insertBefore(span, this);
+  };
+  return img;
+}
+
+let web3, contract, account;
+let prices = Array(10).fill(0), prevPrices = Array(10).fill(0);
+let sTok=-1, sDir=-1, sTf=-1;
+let activeBets=[], histBets=[];
+let cdTimers={};
+let chart, series, entryLine, chartData=[], chartTimer=null;
+let poolData = {pool:0,lpApy:0,lbPool:0,ownerBal:0,volume:0,bets:0,maxBet:0,shares:0};
+
+// ── WALLET CHECK ───────────────────────────────────────────────────
+function checkWallet() {
+  if (!window.ethereum) {
+    document.getElementById('mmHint').style.display = 'block';
+  }
+}
+
+async function connectWallet() {
+  if (!window.ethereum) {
+    toast('Open inside MetaMask browser!', 'err');
+    document.getElementById('mmHint').style.display = 'block';
+    return;
+  }
+  if (typeof Web3 === 'undefined') {
+    toast('Loading... try again in 2s', 'err');
+    return;
+  }
+  try {
+    const acc = await ethereum.request({method:'eth_requestAccounts'});
+    account = acc[0];
+    web3 = new Web3(window.ethereum);
+    const cid = await web3.eth.getChainId();
+    if (Number(cid) !== CFG.CHAIN_ID) {
+      try {
+        await ethereum.request({method:'wallet_switchEthereumChain', params:[{chainId:'0x7BB'}]});
+      } catch {
+        await ethereum.request({method:'wallet_addEthereumChain', params:[{
+          chainId:'0x7BB', chainName:'Ritual Chain',
+          nativeCurrency:{name:'RITUAL',symbol:'RITUAL',decimals:18},
+          rpcUrls:[CFG.RPC], blockExplorerUrls:[CFG.EXPLORER]
+        }]});
+      }
+    }
+    contract = new web3.eth.Contract(ABI, CFG.CONTRACT);
+    const btn = document.getElementById('connectBtn');
+    btn.textContent = account.slice(0,6)+'...'+account.slice(-4);
+    btn.classList.add('on');
+    document.getElementById('netDot').classList.add('on');
+    document.getElementById('netLabel').textContent = 'Ritual Chain · ID 1979 · Connected';
+    document.getElementById('mmHint').style.display = 'none';
+    if (account.toLowerCase() === CFG.OWNER.toLowerCase()) {
+      document.getElementById('ownerCard').style.display = 'block';
+    }
+    await fetchPool();
+    await loadBets();
+    toast('Wallet connected!', 'ok');
+  } catch(e) {
+    toast(e.message.slice(0,60), 'err');
+  }
+}
+
+// ── PRICES ────────────────────────────────────────────────────────
+async function fetchPrices() {
+  try {
+    const ids = TOKENS.map(t=>t.cg).join(',');
+    const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
+    const d = await r.json();
+    prevPrices = [...prices];
+    TOKENS.forEach((t,i) => { if(d[t.cg]) prices[i] = d[t.cg].usd; });
+    renderGrid();
+    updateLiq();
+    updatePayout();
+  } catch(e) {
+    console.warn('Price fetch failed:', e);
+  }
+}
+
+// ── TOKEN GRID ────────────────────────────────────────────────────
+function renderGrid() {
+  const grid = document.getElementById('tokenGrid');
+  grid.innerHTML = '';
+  TOKENS.forEach((t,i) => {
+    const p=prices[i], pv=prevPrices[i]||p, chg=pv?((p-pv)/pv*100):0;
+    const ps = p>=1000?'$'+Math.round(p).toLocaleString():p>=1?'$'+p.toFixed(2):'$'+p.toFixed(4);
+    const cc = chg>=0?'cu':'cd';
+
+    const div = document.createElement('div');
+    div.className = 'tc' + (sTok===i?' on':'');
+    div.onclick = () => selToken(i);
+
+    // Icon with fallback
+    const img = document.createElement('img');
+    img.className = 'tc-img';
+    img.alt = t.s;
+    // Use multiple CDN attempts
+    const iconSrcs = [
+      `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/32/color/${t.s.toLowerCase()}.png`,
+      `https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/svg/color/${t.s.toLowerCase()}.svg`,
+    ];
+    let srcIdx = 0;
+    img.src = iconSrcs[0];
+    img.onerror = function() {
+      srcIdx++;
+      if(srcIdx < iconSrcs.length) {
+        this.src = iconSrcs[srcIdx];
+      } else {
+        // Final fallback: colored circle
+        this.style.display='none';
+        const fb = document.createElement('div');
+        fb.className = 'tc-img';
+        fb.style.cssText=`border-radius:50%;background:${t.color};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;font-family:monospace;`;
+        fb.textContent = t.s.slice(0,2);
+        this.parentNode.insertBefore(fb, this);
+      }
+    };
+
+    div.innerHTML = `<div class="sym">${t.s}</div><div class="prc">${ps}</div><div class="chg ${cc}">${chg>=0?'+':''}${chg.toFixed(2)}%</div>`;
+    div.insertBefore(img, div.firstChild);
+    grid.appendChild(div);
+  });
+}
+
+// ── CHART ─────────────────────────────────────────────────────────
+function initChart() {
+  if (!chartsReady || typeof LightweightCharts === 'undefined') {
+    console.warn('Charts not ready yet');
+    return;
+  }
+  const box = document.getElementById('chartBox');
+  box.innerHTML = '';
+  try {
+    chart = LightweightCharts.createChart(box, {
+      width: box.offsetWidth, height: 175,
+      layout: {background:{color:'#0E0E12'}, textColor:'#555566'},
+      grid: {vertLines:{color:'#16161C'}, horzLines:{color:'#16161C'}},
+      crosshair: {mode: LightweightCharts.CrosshairMode.Normal},
+      rightPriceScale: {borderColor:'#252530'},
+      timeScale: {borderColor:'#252530', timeVisible:true, secondsVisible:true},
+    });
+    series = chart.addAreaSeries({
+      lineColor:'#00FF87', topColor:'rgba(0,255,135,.12)',
+      bottomColor:'rgba(0,255,135,0)', lineWidth:2, priceLineVisible:false
+    });
+    chartData = [];
+    const now = Math.floor(Date.now()/1000), base = prices[sTok]||100;
+    for(let i=29;i>=0;i--) {
+      chartData.push({time:now-(i*10), value:parseFloat((base*(1+(Math.random()-.5)*.0006)).toFixed(6))});
+    }
+    series.setData(chartData);
+    chart.timeScale().fitContent();
+  } catch(e) {
+    console.warn('Chart init error:', e);
+  }
+}
+
+function updateChart() {
+  if(!chart||!series||sTok<0)return;
+  const base=prices[sTok], now=Math.floor(Date.now()/1000);
+  const nv=parseFloat((base*(1+(Math.random()-.5)*.0005)).toFixed(6));
+  const pt={time:now,value:nv};
+  const last=chartData[chartData.length-1];
+  if(last&&last.time===now){chartData[chartData.length-1]=pt;}else{chartData.push(pt);}
+  if(chartData.length>300)chartData.shift();
+  try{
+    series.update(pt);
+    const prev=chartData[chartData.length-2];
+    const isUp=prev?nv>=prev.value:true;
+    series.applyOptions({lineColor:isUp?'#00FF87':'#FF2D2D',topColor:isUp?'rgba(0,255,135,.12)':'rgba(255,45,45,.12)',bottomColor:isUp?'rgba(0,255,135,0)':'rgba(255,45,45,0)'});
+    document.getElementById('chPrice').textContent=' $'+nv.toLocaleString(undefined,{maximumFractionDigits:4});
+    const cp=prev?((nv-prev.value)/prev.value*100):0;
+    const cel=document.getElementById('chChg');
+    cel.textContent=(cp>=0?'+':'')+cp.toFixed(4)+'%';
+    cel.className='cu';
+    if(cp<0)cel.className='cd';
+    drawEntry();
+  }catch(e){}
+}
+
+function drawEntry(){
+  if(!series)return;
+  if(entryLine){try{series.removePriceLine(entryLine);}catch{}entryLine=null;}
+  const pos=activeBets.find(b=>b.token===sTok);
+  if(pos){entryLine=series.createPriceLine({price:pos.entryPrice,color:'#FFD700',lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:'ENTRY'});}
+}
+
+function showChart(idx){
+  const wrap=document.getElementById('chartWrap');
+  wrap.style.display='block';
+  document.getElementById('chName').textContent=TOKENS[idx].s+'/USD';
+  if(chartTimer)clearInterval(chartTimer);
+  setTimeout(()=>{initChart();updateChart();},100);
+  chartTimer=setInterval(updateChart,10000);
+}
+
+// ── SELECTIONS ───────────────────────────────────────────────────
+function selToken(i){sTok=i;renderGrid();updateLiq();updatePayout();updateBtn();showChart(i);}
+function selD(d){
+  sDir=d;
+  document.getElementById('btnUP').classList.toggle('on',d===0);
+  document.getElementById('btnDN').classList.toggle('on',d===1);
+  updateLiq();updatePayout();updateBtn();
+}
+function selT(m){sTf=m;document.querySelectorAll('.tf-btn').forEach((b,i)=>b.classList.toggle('on',[1,2,3,5][i]===m));updateBtn();}
+function sa(v){document.getElementById('amtInput').value=v;updatePayout();updateBtn();}
+
+function updateLiq(){
+  const el=document.getElementById('liqBox');
+  if(sTok<0||sDir<0){el.innerHTML=`<strong>⚡ 1000x LEVERAGE</strong><br>Select token & direction.<br>Price moves <strong>0.1%</strong> against you = <strong>LIQUIDATED</strong>`;return;}
+  const e=prices[sTok],liq=sDir===0?e*.999:e*1.001;
+  const ps=v=>v>=1000?'$'+v.toLocaleString(undefined,{maximumFractionDigits:2}):v>=1?'$'+v.toFixed(4):'$'+v.toFixed(6);
+  el.innerHTML=`<strong>⚡ 1000x LEVERAGE · ${TOKENS[sTok].s}</strong><br>Entry: <strong>${ps(e)}</strong> | Liq: <strong style="color:var(--red)">${ps(liq)}</strong><br>0.1% move ${sDir===0?'DOWN':'UP'} = <strong>LIQUIDATED</strong>`;
+}
+
+function updatePayout(){
+  const el=document.getElementById('payBox'),amt=parseFloat(document.getElementById('amtInput').value);
+  if(!(amt>0)||sTok<0||sDir<0){el.style.display='none';return;}
+  document.getElementById('pvBet').textContent=amt.toFixed(4);
+  document.getElementById('pvPay').textContent=(amt*2).toFixed(4);
+  el.style.display='block';
+}
+
+function updateBtn(){
+  const btn=document.getElementById('betBtn'),amt=parseFloat(document.getElementById('amtInput').value);
+  if(sTok<0||sDir<0||sTf<0||!(amt>0)){btn.disabled=true;btn.textContent='SELECT OPTIONS';btn.className='';return;}
+  btn.disabled=false;
+  if(sDir===0){btn.className='up';btn.textContent=`▲ MOON ${TOKENS[sTok].s} · ${sTf}MIN`;}
+  else{btn.className='dn';btn.textContent=`▼ DUMP ${TOKENS[sTok].s} · ${sTf}MIN`;}
+}
+
+// ── PLACE BET ────────────────────────────────────────────────────
+async function placeBet(){
+  if(!account){toast('Connect wallet first!','err');return;}
+  const amt=parseFloat(document.getElementById('amtInput').value);
+  if(!(amt>0)){toast('Enter amount!','err');return;}
+  if(poolData.pool===0){toast('Pool empty! Add LP first.','err');return;}
+  if(amt>poolData.maxBet){toast(`Max: ${poolData.maxBet.toFixed(4)} RITUAL`,'err');return;}
+  const btn=document.getElementById('betBtn');
+  btn.disabled=true;btn.textContent='CONFIRMING...';
+  try{
+    const total=web3.utils.toWei((amt+0.001).toFixed(6),'ether');
+    await contract.methods.placeBet(sTok,sDir,sTf).send({from:account,value:total});
+    toast(`Bet placed! ${sDir===0?'▲':'▼'} ${TOKENS[sTok].s} · ${sTf}min`,'ok');
+    await fetchPool();await loadBets();sw('positions');
+  }catch(e){toast(e.message.slice(0,70),'err');}
+  finally{updateBtn();}
+}
+
+// ── POOL ─────────────────────────────────────────────────────────
+async function fetchPool(){
+  if(!contract)return;
+  try{
+    const d=await contract.methods.getPoolInfo().call();
+    const f=v=>parseFloat(web3.utils.fromWei(v.toString(),'ether'));
+    poolData={pool:f(d.pool_),lpApy:f(d.lpApy_),lbPool:f(d.lbPool_),ownerBal:f(d.ownerBal_),volume:f(d.volume_),bets:Number(d.bets_),maxBet:f(d.maxBet_),shares:f(d.shares_)};
+    const ff=v=>v.toFixed(4);
+    document.getElementById('pbPool').textContent=ff(poolData.pool);
+    document.getElementById('pbMax').textContent=ff(poolData.maxBet);
+    document.getElementById('pbLb').textContent=ff(poolData.lbPool);
+    document.getElementById('pbBets').textContent=poolData.bets;
+    document.getElementById('maxVal').textContent=ff(poolData.maxBet);
+    document.getElementById('pTotal').textContent=ff(poolData.pool)+' RITUAL';
+    document.getElementById('pMax').textContent=ff(poolData.maxBet)+' RITUAL';
+    document.getElementById('pVol').textContent=ff(poolData.volume)+' RITUAL';
+    document.getElementById('pBets').textContent=poolData.bets;
+    document.getElementById('pApy').textContent=ff(poolData.lpApy)+' RITUAL';
+    document.getElementById('pLb').textContent=ff(poolData.lbPool)+' RITUAL';
+    document.getElementById('lbPoolVal').textContent=ff(poolData.lbPool)+' RITUAL';
+    document.getElementById('ownerBal').textContent=ff(poolData.ownerBal)+' RITUAL';
+    if(account)loadMyLP();
+  }catch(e){console.warn('fetchPool err:',e);}
+}
+
+async function loadMyLP(){
+  if(!contract||!account)return;
+  try{
+    const d=await contract.methods.getLPInfo(account).call();
+    const f=v=>parseFloat(web3.utils.fromWei(v.toString(),'ether'));
+    const shares=f(d.shares_),val=f(d.usdcValue_),apy=f(d.pendingApy_);
+    if(shares>0){
+      document.getElementById('myLpCard').style.display='block';
+      document.getElementById('myShares').textContent=shares.toFixed(6);
+      document.getElementById('myVal').textContent=val.toFixed(4)+' RITUAL';
+      document.getElementById('myApy').textContent=apy.toFixed(6)+' RITUAL';
+    }
+  }catch{}
+}
+
+async function depositLP(){
+  if(!account){toast('Connect wallet!','err');return;}
+  const amt=parseFloat(document.getElementById('depInput').value);
+  if(!(amt>0)){toast('Enter amount!','err');return;}
+  try{
+    await contract.methods.depositLP().send({from:account,value:web3.utils.toWei(amt.toString(),'ether')});
+    toast(`Deposited ${amt} RITUAL!`,'ok');await fetchPool();
+  }catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+async function claimApy(){
+  if(!account)return;
+  try{await contract.methods.claimApy().send({from:account});toast('APY claimed!','ok');await fetchPool();}
+  catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+async function removeLP(){
+  if(!account)return;
+  try{
+    const d=await contract.methods.getLPInfo(account).call();
+    await contract.methods.withdrawLP(d.shares_).send({from:account});
+    toast('LP withdrawn!','ok');await fetchPool();
+    document.getElementById('myLpCard').style.display='none';
+  }catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+async function withdrawOwner(){
+  if(!account)return;
+  try{await contract.methods.withdrawOwner().send({from:account});toast('Fees withdrawn!','ok');await fetchPool();}
+  catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+async function resetEpoch(){
+  if(!account)return;
+  try{await contract.methods.resetEpoch().send({from:account});toast('Epoch reset!','ok');loadLeaderboard();}
+  catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+// ── LEADERBOARD ──────────────────────────────────────────────────
+async function loadLeaderboard(){
+  if(!contract)return;
+  try{
+    const d=await contract.methods.getLeaderboard().call();
+    const el=document.getElementById('lbList');
+    const zero='0x0000000000000000000000000000000000000000';
+    const active=d.addrs.filter(a=>a!==zero);
+    if(!active.length){el.innerHTML=`<div class="empty"><em>🏆</em>Start trading!</div>`;return;}
+    const rl=(i)=>i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`;
+    const rc=(i)=>i===0?'r1':i===1?'r2':i===2?'r3':'';
+    el.innerHTML=d.addrs.map((a,i)=>{
+      if(a===zero)return'';
+      const vol=parseFloat(web3.utils.fromWei(d.volumes[i].toString(),'ether'));
+      const isMe=account&&a.toLowerCase()===account.toLowerCase();
+      return `<div class="lb-row" style="${isMe?'background:rgba(255,215,0,.05);border-radius:5px;':''}">
+        <div class="lb-rank ${rc(i)}">${rl(i)}</div>
+        <div class="lb-addr">${isMe?'<span style="color:var(--gold)">YOU</span>':a.slice(0,6)+'...'+a.slice(-4)}</div>
+        <div class="lb-vol">${vol.toFixed(3)}</div>
+        <div>${isMe?`<button class="lb-claim" onclick="claimLB()">CLAIM</button>`:'--'}</div>
+      </div>`;
+    }).join('');
+  }catch(e){console.warn('LB err:',e);}
+}
+
+async function claimLB(){
+  if(!account)return;
+  try{await contract.methods.claimLeaderboard().send({from:account});toast('Reward claimed!','ok');await fetchPool();}
+  catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+// ── BETS ─────────────────────────────────────────────────────────
+async function loadBets(){
+  if(!contract||!account)return;
+  try{
+    const ids=await contract.methods.getPlayerBets(account).call();
+    activeBets=[];histBets=[];
+    for(const id of ids){
+      const b=await contract.methods.getBet(id).call();
+      const o={id:Number(id),token:Number(b.token),direction:Number(b.direction),
+        amount:parseFloat(web3.utils.fromWei(b.amount.toString(),'ether')),
+        entryPrice:Number(b.entryPrice)/1e8,expiry:Number(b.expiry),
+        status:Number(b.status),timeframe:Number(b.timeframe),
+        payout:parseFloat(web3.utils.fromWei(b.potentialPayout.toString(),'ether'))};
+      if(o.status===0)activeBets.push(o);else histBets.unshift(o);
+    }
+    renderPositions();renderHistory();drawEntry();
+  }catch(e){console.warn('loadBets err:',e);}
+}
+
+function renderPositions(){
+  const el=document.getElementById('posList');
+  if(!activeBets.length){el.innerHTML=`<div class="empty"><em>📭</em>No active positions.</div>`;return;}
+  el.innerHTML=activeBets.map(p=>{
+    const t=TOKENS[p.token],dc=p.direction===0?'up':'dn',dl=p.direction===0?'▲ MOON':'▼ DUMP';
+    return `<div class="pos-card ${dc}">
+      <div class="pos-head">
+        <span class="pos-tok">${t.s}</span>
+        <span class="pos-badge ${dc}">${dl}</span>
+      </div>
+      <div class="pos-grid">
+        <span>Entry<strong>$${p.entryPrice.toFixed(4)}</strong></span>
+        <span>Timeframe<strong>${p.timeframe} min</strong></span>
+        <span>Bet<strong>${p.amount.toFixed(4)} RITUAL</strong></span>
+        <span>Win<strong style="color:var(--green)">${p.payout.toFixed(4)} RITUAL</strong></span>
+      </div>
+      <div class="countdown" id="cd-${p.id}">--:--</div>
+      <button class="res-btn" onclick="resolveBet(${p.id})">⚡ RESOLVE BET</button>
+    </div>`;
+  }).join('');
+  activeBets.forEach(p=>startCd(p.id,p.expiry));
+}
+
+function startCd(id,expiry){
+  if(cdTimers[id])clearInterval(cdTimers[id]);
+  cdTimers[id]=setInterval(()=>{
+    const el=document.getElementById(`cd-${id}`);
+    if(!el){clearInterval(cdTimers[id]);return;}
+    const rem=expiry-Math.floor(Date.now()/1000);
+    if(rem<=0){el.textContent='⚡ READY TO RESOLVE';el.style.color='var(--gold)';}
+    else{el.textContent=`${Math.floor(rem/60).toString().padStart(2,'0')}:${(rem%60).toString().padStart(2,'0')}`;el.style.color=rem<30?'var(--red)':'var(--text)';}
+  },1000);
+}
+
+async function resolveBet(id){
+  if(!contract||!account)return;
+  try{await contract.methods.resolveBet(id).send({from:account});toast('Resolved!','ok');await fetchPool();await loadBets();}
+  catch(e){toast(e.message.slice(0,70),'err');}
+}
+
+function renderHistory(){
+  const el=document.getElementById('histList');
+  if(!histBets.length){el.innerHTML=`<div class="empty"><em>🎰</em>No history yet.</div>`;return;}
+  const SL=['','WON','LOST','REKT'],SC=['','won','lost','liq'];
+  el.innerHTML=histBets.map(h=>{
+    const t=TOKENS[h.token];
+    return `<div class="hist-row">
+      <div class="hist-badge ${SC[h.status]}">${SL[h.status]}</div>
+      <div class="hist-meta">
+        <strong>${t.s} · ${h.direction===0?'▲':'▼'} · ${h.timeframe}min</strong>
+        ${h.amount.toFixed(4)} RITUAL → ${h.payout.toFixed(4)} RITUAL
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── TABS ─────────────────────────────────────────────────────────
+function sw(name){
+  const tabs=['trade','positions','leaderboard','lp','history'];
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',tabs[i]===name));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
+  document.getElementById(`tab-${name}`).classList.add('on');
+  if(name==='positions')loadBets();
+  if(name==='leaderboard'){fetchPool();loadLeaderboard();}
+  if(name==='lp')fetchPool();
+  if(name==='history')loadBets();
+}
+
+function toast(msg,type=''){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.className=`show ${type}`;
+  setTimeout(()=>el.className='',3200);
+}
+
+// ── INIT ─────────────────────────────────────────────────────────
+document.getElementById('amtInput').addEventListener('input',()=>{updatePayout();updateBtn();});
+renderGrid();
+fetchPrices();
+setInterval(fetchPrices,30000);
+setInterval(()=>{if(contract)fetchPool();},15000);
+</script>
+</body>
+</html>
